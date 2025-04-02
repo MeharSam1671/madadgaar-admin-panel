@@ -1,0 +1,11 @@
+html,body,#root,.app.content{
+  height: 100%;
+  width: 100%;
+}
+.app{
+  display: flex;
+  position: relative;
+}
+body {
+  @apply bg-gray-100 text-gray-900;
+}
