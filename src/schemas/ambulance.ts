@@ -1,5 +1,5 @@
 export interface Ambulance {
-  id: string;
+  id: number;
   plateNumber: string;
   assignedTo: {
     id: string;

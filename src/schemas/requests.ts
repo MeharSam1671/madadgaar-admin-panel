@@ -4,6 +4,7 @@ export interface HelpRequest {
   location: string;
   status: string;
   type: string;
+  ambulanceId?: number | null;
   driver?: string;
   driverId?: number | string;
   driverContact?: string;

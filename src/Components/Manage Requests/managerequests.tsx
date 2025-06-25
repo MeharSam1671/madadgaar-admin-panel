@@ -122,6 +122,7 @@ export default function ManageRequests() {
         id: newRequest?.emergency?.id,
         location: newRequest?.emergency?.locationName,
         patient: newRequest?.emergency?.reporter?.firstName,
+        ambulanceId: newRequest?.emergency?.ambulance?.id,
         type: newRequest?.emergency?.ambulance?.type,
         driver: newRequest?.emergency?.ambulance?.driver?.name,
         driverId: newRequest?.emergency?.ambulance?.driver?.id,

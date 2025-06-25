@@ -30,13 +30,18 @@ const getVehicleIcon = (
   type: string,
   status: string,
   isHighlighted: boolean = false,
-  isOnline: boolean = false
+  isOnline: boolean = false,
+  isRequestedVehicle: boolean = false
 ): google.maps.Icon => {
   // Get color based on status or if it's highlighted
   let colorName;
   let colorShortName; // Short name for color
 
-  if (isHighlighted) {
+  if (isRequestedVehicle) {
+    // Special color for the specifically requested ambulance
+    colorName = "purple"; // Purple for requested vehicle
+    colorShortName = "pur";
+  } else if (isHighlighted) {
     colorName = "green"; // Highlighted ambulance (the one in the request)
     colorShortName = "grn";
   } else if (isOnline) {
@@ -74,21 +79,37 @@ const getVehicleIcon = (
   let iconUrl;
   switch (type.toUpperCase()) {
     case "FIRST_RESPONDER":
-      // Bike/motorcycle
-      iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorName}-dot.png`;
+      // Bike/motorcycle - use star for requested vehicle
+      if (isRequestedVehicle) {
+        iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorShortName}-pushpin.png`;
+      } else {
+        iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorName}-dot.png`;
+      }
       break;
     case "FIRE_TRUCK":
-      // Fire truck
-      iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorShortName}-pushpin.png`;
+      // Fire truck - use different style for requested vehicle
+      if (isRequestedVehicle) {
+        iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorName}.png`;
+      } else {
+        iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorShortName}-pushpin.png`;
+      }
       break;
     case "AMBULANCE":
-      // Standard ambulance
-      iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorName}.png`;
+      // Standard ambulance - use pushpin for requested vehicle
+      if (isRequestedVehicle) {
+        iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorShortName}-pushpin.png`;
+      } else {
+        iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorName}.png`;
+      }
       break;
     case "OTHER":
     default:
       // Default for other types
-      iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorName}-dot.png`;
+      if (isRequestedVehicle) {
+        iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorShortName}-pushpin.png`;
+      } else {
+        iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorName}-dot.png`;
+      }
   }
 
   return { url: iconUrl };
@@ -253,25 +274,35 @@ const ReviewRequestMap = ({
 
       // Add ambulance markers
       const ambulanceMarkers = ambulancesToShow.map((ambulance) => {
-        // Determine if this ambulance should be highlighted - either it matches the driver ID
-        // or it matches the requested vehicle type
-        const isHighlighted = Boolean(
-          request?.driverId === ambulance.driver?.id ||
-            (request?.type &&
-              ambulance.type.toUpperCase() === request.type.toUpperCase())
+        // Check if this is the specifically requested ambulance by ID
+        const isRequestedVehicle = Boolean(
+          request?.ambulanceId && ambulance.id === request.ambulanceId
         );
+
+        // Determine if this ambulance should be highlighted - either it matches the driver ID
+        // or it matches the requested vehicle type (but not the specific requested vehicle)
+        const isHighlighted = Boolean(
+          !isRequestedVehicle &&
+            (request?.driverId === ambulance.driver?.id ||
+              (request?.type &&
+                ambulance.type.toUpperCase() === request.type.toUpperCase()))
+        );
+
+        // Create title with special indication for requested vehicle
+        const titlePrefix = isRequestedVehicle ? "⭐ SUGGESTED: " : "";
 
         return new google.maps.Marker({
           position: { lat: ambulance.lat, lng: ambulance.lang },
           map: googleMap,
-          title: `${ambulance.type}: ${ambulance.plateNumber} (${
+          title: `${titlePrefix}${ambulance.type}: ${ambulance.plateNumber} (${
             ambulance.status
           }) - ${ambulance.calculatedDistance.toFixed(2)}km away`,
           icon: getVehicleIcon(
             ambulance.type,
             ambulance.status,
             isHighlighted,
-            ambulance?.driver?.isOnline
+            ambulance?.driver?.isOnline,
+            isRequestedVehicle
           ),
         });
       });
