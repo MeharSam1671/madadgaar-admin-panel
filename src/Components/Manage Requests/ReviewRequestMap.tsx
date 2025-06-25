@@ -1,59 +1,98 @@
 import React, { useCallback, useEffect, useState, useRef } from "react";
 import { HelpRequest } from "../../schemas/requests";
-import { apiSocket } from "../../api/apiController";
+import apiController, { apiSocket } from "../../api/apiController";
+import { Ambulance } from "../../schemas/ambulance";
+import { LocationUpdateSocketResponse } from "../../schemas/sockets";
 
-// Function to generate ambulances with one at the exact request distance
-function generateAmbulances(
-  center: { lat: number; lng: number },
-  count = 3,
-  requestDistance: string
-) {
-  const ambulances = [];
+// Function to calculate distance between two points in kilometers using the Haversine formula
+const calculateDistance = (
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number
+): number => {
+  const R = 6371; // Radius of the earth in km
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLng = (lng2 - lng1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const distance = R * c; // Distance in km
+  return distance;
+};
 
-  // Parse the distance from the request (e.g., "900m" or "2.5km")
-  let exactDistance = 3; // Default if parsing fails
+// Function to get appropriate marker icon based on vehicle type and status
+const getVehicleIcon = (
+  type: string,
+  status: string,
+  isHighlighted: boolean = false,
+  isOnline: boolean = false
+): google.maps.Icon => {
+  // Get color based on status or if it's highlighted
+  let colorName;
+  let colorShortName; // Short name for color
 
-  if (requestDistance) {
-    if (requestDistance.endsWith("km")) {
-      exactDistance = parseFloat(requestDistance.replace("km", ""));
-    } else if (requestDistance.endsWith("m")) {
-      exactDistance = parseFloat(requestDistance.replace("m", "")) / 1000; // Convert meters to km
+  if (isHighlighted) {
+    colorName = "green"; // Highlighted ambulance (the one in the request)
+    colorShortName = "grn";
+  } else if (isOnline) {
+    colorName = "pink";
+    colorShortName = "pink";
+  } else {
+    switch (status.toUpperCase()) {
+      case "AVAILABLE":
+        colorName = "green"; // Available
+        colorShortName = "grn";
+        break;
+      case "UNAVAILABLE_TEMPORARILY":
+        colorName = "yellow"; // Temporarily unavailable
+        colorShortName = "ylw";
+        break;
+      case "DISPATCHED":
+        colorName = "blue"; // On service/dispatched
+        colorShortName = "blue";
+        break;
+      case "UNDER_MAINTENANCE":
+        colorName = "orange"; // Under maintenance
+        colorShortName = "org";
+        break;
+      case "OUT_OF_SERVICE":
+        colorName = "red"; // Out of service
+        colorShortName = "red";
+        break;
+      default:
+        colorName = "purple"; // Unknown status
+        colorShortName = "pur";
     }
   }
 
-  // First ambulance at exact distance from request
-  const exactAngle = Math.random() * 2 * Math.PI;
-  const dLatExact = (exactDistance / 111) * Math.cos(exactAngle);
-  const dLngExact =
-    (exactDistance / (111 * Math.cos(center.lat * (Math.PI / 180)))) *
-    Math.sin(exactAngle);
-
-  ambulances.push({
-    lat: center.lat + dLatExact,
-    lng: center.lng + dLngExact,
-    id: 1,
-    isMatchingRequestDistance: true,
-  });
-
-  // Add remaining ambulances
-  for (let i = 1; i < count; i++) {
-    const angle = Math.random() * 2 * Math.PI;
-    const distance = 2 + Math.random() * 3; // Random distance between 2-5km
-    const dLat = (distance / 111) * Math.cos(angle);
-    const dLng =
-      (distance / (111 * Math.cos(center.lat * (Math.PI / 180)))) *
-      Math.sin(angle);
-
-    ambulances.push({
-      lat: center.lat + dLat,
-      lng: center.lng + dLng,
-      id: i + 1,
-      isMatchingRequestDistance: false,
-    });
+  // Get icon style based on vehicle type
+  let iconUrl;
+  switch (type.toUpperCase()) {
+    case "FIRST_RESPONDER":
+      // Bike/motorcycle
+      iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorName}-dot.png`;
+      break;
+    case "FIRE_TRUCK":
+      // Fire truck
+      iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorShortName}-pushpin.png`;
+      break;
+    case "AMBULANCE":
+      // Standard ambulance
+      iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorName}.png`;
+      break;
+    case "OTHER":
+    default:
+      // Default for other types
+      iconUrl = `https://maps.google.com/mapfiles/ms/icons/${colorName}-dot.png`;
   }
 
-  return ambulances;
-}
+  return { url: iconUrl };
+};
 
 const defaultLatLng = { lat: 32.1877, lng: 74.1945 };
 
@@ -67,6 +106,9 @@ const ReviewRequestMap = ({
   const mapRef = useRef<HTMLDivElement>(null);
   const [map, setMap] = useState<google.maps.Map | null>(null);
   const [markers, setMarkers] = useState<google.maps.Marker[]>([]);
+  const [ambulanceLocations, setAmbulanceLocations] = useState<Ambulance[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [apiError, setApiError] = useState<string | null>(null);
 
   // Get reporter location
   const reporterLatLng =
@@ -74,20 +116,76 @@ const ReviewRequestMap = ({
       ? { lat: Number(request.lat), lng: Number(request.lng) }
       : defaultLatLng;
 
-  // Generate ambulances once with one at the exact distance
-  const ambulances = useRef(
-    generateAmbulances(
-      reporterLatLng,
-      2 + Math.floor(Math.random() * 3),
-      typeof request?.distance === "number"
-        ? `${request.distance}km`
-        : request?.distance || "3km"
-    )
-  ).current;
+  // Fetch ambulance locations from backend
+  const fetchAmbulanceLocations = async () => {
+    try {
+      setIsLoading(true);
+      setApiError(null);
+      const response = await apiController.get("/admin/vehicles?limit=100");
+      const data = response.data;
+      const { vehicles } = data;
+      if (Array.isArray(vehicles)) {
+        setAmbulanceLocations(vehicles);
+      } else if (data && typeof data === "object") {
+        const locationsArray = data.ambulances || data.locations || [];
+        setAmbulanceLocations(
+          Array.isArray(locationsArray) ? locationsArray : []
+        );
+      } else {
+        setAmbulanceLocations([]);
+        setApiError("Received unexpected data format from server");
+      }
+    } catch (error) {
+      setAmbulanceLocations([]);
+      setApiError(
+        "Failed to fetch ambulance locations. Please try again later."
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Fetch initial ambulance data
+  useEffect(() => {
+    fetchAmbulanceLocations();
+  }, []);
+
+  // Listen for real-time location updates
+  useEffect(() => {
+    if (isLoading) return;
+
+    const updateVehicleLocation = (
+      driverId: number,
+      newLocationData: { lat: number; lang: number; timestamp: string }
+    ) => {
+      setAmbulanceLocations((prev) =>
+        prev.map((vehicle) => {
+          if (vehicle?.driver?.id === driverId) {
+            return {
+              ...vehicle,
+              lat: newLocationData.lat,
+              lang: newLocationData.lang,
+            };
+          }
+          return vehicle;
+        })
+      );
+    };
+
+    const socket = apiSocket.connect();
+    socket.on("driverLocationUpdate", (data: LocationUpdateSocketResponse) => {
+      updateVehicleLocation(data.driverId, data);
+    });
+
+    return () => {
+      socket.off("driverLocationUpdate");
+      socket.disconnect?.();
+    };
+  }, [isLoading]);
 
   // Initialize map
   useEffect(() => {
-    if (!mapRef.current) return;
+    if (!mapRef.current || isLoading) return;
 
     // Load Google Maps API script
     const script = document.createElement("script");
@@ -116,26 +214,96 @@ const ReviewRequestMap = ({
       const reporterMarker = new google.maps.Marker({
         position: reporterLatLng,
         map: googleMap,
-        title: "Reporter Location",
+        title: "Emergency Location",
         icon: "http://maps.google.com/mapfiles/ms/icons/red-dot.png",
       });
 
-      // Add ambulance markers (green for exact distance, grey for others)
-      const ambulanceMarkers = ambulances.map(
-        (amb) =>
-          new google.maps.Marker({
-            position: { lat: amb.lat, lng: amb.lng },
-            map: googleMap,
-            title: amb.isMatchingRequestDistance
-              ? `Ambulance #${amb.id} (${request?.distance} away)`
-              : `Ambulance #${amb.id}`,
-            icon: amb.isMatchingRequestDistance
-              ? "http://maps.google.com/mapfiles/ms/icons/green-dot.png"
-              : "http://maps.google.com/mapfiles/ms/icons/yellow-dot.png",
-          })
+      // Filter and sort ambulances by type and distance
+      let filteredAmbulances = ambulanceLocations
+        // First filter by type if specified in the request
+        .filter((ambulance) => {
+          // If request has a specific type, filter by it - otherwise include all
+          return (
+            !request?.type ||
+            ambulance.type.toUpperCase() === request.type.toUpperCase()
+          );
+        })
+        // Then add distance property to each ambulance
+        .map((ambulance) => {
+          const distance = calculateDistance(
+            reporterLatLng.lat,
+            reporterLatLng.lng,
+            ambulance.lat,
+            ambulance.lang
+          );
+          return { ...ambulance, calculatedDistance: distance };
+        })
+        // Sort by distance from the emergency location
+        .sort((a, b) => a.calculatedDistance - b.calculatedDistance);
+
+      // Get ambulances within 5km radius
+      let ambulancesToShow = filteredAmbulances.filter(
+        (amb) => amb.calculatedDistance <= 5
       );
 
+      // If less than 5 ambulances within 5km, take the 5 closest
+      if (ambulancesToShow.length < 5) {
+        ambulancesToShow = filteredAmbulances.slice(0, 5);
+      }
+
+      // Add ambulance markers
+      const ambulanceMarkers = ambulancesToShow.map((ambulance) => {
+        // Determine if this ambulance should be highlighted - either it matches the driver ID
+        // or it matches the requested vehicle type
+        const isHighlighted = Boolean(
+          request?.driverId === ambulance.driver?.id ||
+            (request?.type &&
+              ambulance.type.toUpperCase() === request.type.toUpperCase())
+        );
+
+        return new google.maps.Marker({
+          position: { lat: ambulance.lat, lng: ambulance.lang },
+          map: googleMap,
+          title: `${ambulance.type}: ${ambulance.plateNumber} (${
+            ambulance.status
+          }) - ${ambulance.calculatedDistance.toFixed(2)}km away`,
+          icon: getVehicleIcon(
+            ambulance.type,
+            ambulance.status,
+            isHighlighted,
+            ambulance?.driver?.isOnline
+          ),
+        });
+      });
+
       setMarkers([reporterMarker, ...ambulanceMarkers]);
+
+      // Fit bounds to include the reporter and filtered ambulances
+      const bounds = new google.maps.LatLngBounds();
+      bounds.extend(reporterLatLng);
+
+      // Add each ambulance to bounds
+      ambulancesToShow.forEach((amb) => {
+        bounds.extend({ lat: amb.lat, lng: amb.lang });
+      });
+
+      googleMap.fitBounds(bounds);
+
+      // Check if we need to restrict to 5km radius
+      if (ambulancesToShow.length >= 5) {
+        // Add a circle to show the 5km radius
+        new google.maps.Circle({
+          strokeColor: "#FF0000",
+          strokeOpacity: 0.8,
+          strokeWeight: 1,
+          fillColor: "#FF0000",
+          fillOpacity: 0.1,
+          map: googleMap,
+          center: reporterLatLng,
+          radius: 5000, // 5km in meters
+          zIndex: -1, // Put it behind markers
+        });
+      }
     };
 
     document.head.appendChild(script);
@@ -145,7 +313,7 @@ const ReviewRequestMap = ({
       markers.forEach((marker) => marker.setMap(null));
       document.head.removeChild(script);
     };
-  }, []);
+  }, [ambulanceLocations, isLoading]);
 
   return (
     <div className="map-container">
@@ -156,14 +324,90 @@ const ReviewRequestMap = ({
           height: "300px",
           border: "1px solid #ccc",
           borderRadius: "4px",
+          position: "relative",
         }}
-      />
+      >
+        {/* Loading overlay */}
+        {isLoading && (
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: "100%",
+              height: "100%",
+              background: "rgba(255,255,255,0.7)",
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center",
+              zIndex: 10,
+            }}
+          >
+            <div className="spinner-border text-primary" role="status">
+              <span className="visually-hidden">Loading...</span>
+            </div>
+          </div>
+        )}
+
+        {apiError && (
+          <div
+            className="alert alert-danger m-2"
+            style={{
+              position: "absolute",
+              top: 10,
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 10,
+            }}
+          >
+            {apiError}
+            <button
+              className="btn btn-sm btn-outline-danger ms-3"
+              onClick={fetchAmbulanceLocations}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+      </div>
 
       <div className="mt-2 small text-muted">
-        <p>
-          Nearest ambulance is {request?.distance} away, with{" "}
-          {ambulances.length - 1} other ambulances available
-        </p>
+        {!isLoading && (
+          <div>
+            <p className="mb-1">
+              <strong>Showing:</strong>{" "}
+              {
+                ambulanceLocations.filter((amb) => {
+                  const distance = calculateDistance(
+                    reporterLatLng.lat,
+                    reporterLatLng.lng,
+                    amb.lat,
+                    amb.lang
+                  );
+                  return distance <= 5;
+                }).length
+              }{" "}
+              ambulance
+              {ambulanceLocations.filter((amb) => {
+                const distance = calculateDistance(
+                  reporterLatLng.lat,
+                  reporterLatLng.lng,
+                  amb.lat,
+                  amb.lang
+                );
+                return distance <= 5;
+              }).length !== 1
+                ? "s"
+                : ""}{" "}
+              within 5km
+            </p>
+            {request?.type && (
+              <p className="mb-0">
+                <strong>Filtered by type:</strong> {request.type}
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Action buttons */}
@@ -221,4 +465,6 @@ const ReviewRequestMap = ({
 };
 
 export default ReviewRequestMap;
+
+
 
